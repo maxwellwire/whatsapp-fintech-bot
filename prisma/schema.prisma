@@ -1,0 +1,341 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+  BLOCKED
+}
+
+enum WalletStatus {
+  ACTIVE
+  FROZEN
+  CLOSED
+}
+
+enum LedgerEntryType {
+  DEBIT
+  CREDIT
+}
+
+enum TransactionType {
+  WALLET_FUNDING
+  AIRTIME
+  DATA
+  BANK_TRANSFER
+  REVERSAL
+  FEE
+  ADJUSTMENT
+}
+
+enum TransactionStatus {
+  PENDING
+  PROCESSING
+  SUCCESS
+  FAILED
+  REVERSED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  PENDING
+  PROCESSING
+  SUCCESS
+  FAILED
+  REVERSED
+}
+
+enum PaymentProvider {
+  PAYSTACK
+  FLUTTERWAVE
+  MANUAL
+  OTHER
+}
+
+enum NetworkProvider {
+  MTN
+  AIRTEL
+  GLO
+  NINE_MOBILE
+  OTHER
+}
+
+model User {
+  id           String     @id @default(cuid())
+  phoneNumber  String     @unique @map("phone_number")
+  firstName    String?    @map("first_name")
+  lastName     String?    @map("last_name")
+  email        String?    @unique
+  status       UserStatus @default(PENDING)
+  pinHash      String?    @map("pin_hash")
+  pinAttempts  Int        @default(0) @map("pin_attempts")
+  pinLockedUntil DateTime? @map("pin_locked_until")
+  kycLevel     Int        @default(0) @map("kyc_level")
+  lastActiveAt DateTime?  @map("last_active_at")
+  createdAt    DateTime   @default(now()) @map("created_at")
+  updatedAt    DateTime   @updatedAt @map("updated_at")
+
+  wallet         Wallet?
+  transactions   Transaction[]
+  beneficiaries  Beneficiary[]
+  payments       Payment[]
+  sessions       ConversationSession[]
+  authChallenges AuthChallenge[]
+  auditLogs      AuditLog[]
+
+  @@index([status])
+  @@map("users")
+}
+
+model Wallet {
+  id        String       @id @default(cuid())
+  userId    String       @unique @map("user_id")
+  currency  String       @default("NGN") @db.VarChar(3)
+  /// Balance in kobo (minor units). ₦1 = 100 kobo.
+  balance   BigInt       @default(0)
+  version   Int          @default(0)
+  status    WalletStatus @default(ACTIVE)
+  createdAt DateTime     @default(now()) @map("created_at")
+  updatedAt DateTime     @updatedAt @map("updated_at")
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ledgerEntries WalletLedger[]
+
+  @@map("wallets")
+}
+
+model WalletLedger {
+  id            String          @id @default(cuid())
+  walletId      String?         @map("wallet_id")
+  transactionId String          @map("transaction_id")
+  entryType     LedgerEntryType
+  /// Always positive, in kobo
+  amount        BigInt
+  balanceAfter  BigInt?         @map("balance_after")
+  description   String?         @db.VarChar(500)
+  metadata      Json?
+  createdAt     DateTime        @default(now()) @map("created_at")
+
+  wallet      Wallet?     @relation(fields: [walletId], references: [id])
+  transaction Transaction @relation(fields: [transactionId], references: [id])
+
+  @@index([walletId, createdAt])
+  @@index([transactionId])
+  @@map("wallet_ledgers")
+}
+
+model Transaction {
+  id                String            @id @default(cuid())
+  userId            String            @map("user_id")
+  type              TransactionType
+  status            TransactionStatus @default(PENDING)
+  /// Amount in kobo
+  amount            BigInt
+  fee               BigInt            @default(0)
+  currency          String            @default("NGN") @db.VarChar(3)
+  description       String?           @db.VarChar(500)
+  idempotencyKey    String            @unique @map("idempotency_key")
+  externalReference String?           @map("external_reference")
+  provider          String?           @db.VarChar(50)
+  providerReference String?           @map("provider_reference")
+  metadata          Json?
+  failureReason     String?           @map("failure_reason") @db.VarChar(1000)
+  completedAt       DateTime?         @map("completed_at")
+  createdAt         DateTime          @default(now()) @map("created_at")
+  updatedAt         DateTime          @updatedAt @map("updated_at")
+
+  user            User             @relation(fields: [userId], references: [id])
+  ledgerEntries   WalletLedger[]
+  airtimePurchase AirtimePurchase?
+  dataPurchase    DataPurchase?
+  bankTransfer    BankTransfer?
+  payment         Payment?
+
+  @@unique([provider, providerReference])
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+  @@index([externalReference])
+  @@map("transactions")
+}
+
+model AirtimePurchase {
+  id                String            @id @default(cuid())
+  transactionId     String            @unique @map("transaction_id")
+  phoneNumber       String            @map("phone_number") @db.VarChar(20)
+  network           NetworkProvider
+  amount            BigInt
+  provider          String            @db.VarChar(50)
+  providerReference String?           @map("provider_reference")
+  status            TransactionStatus @default(PENDING)
+  metadata          Json?
+  createdAt         DateTime          @default(now()) @map("created_at")
+  updatedAt         DateTime          @updatedAt @map("updated_at")
+
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  @@index([phoneNumber])
+  @@map("airtime_purchases")
+}
+
+model DataPurchase {
+  id                String            @id @default(cuid())
+  transactionId     String            @unique @map("transaction_id")
+  phoneNumber       String            @map("phone_number") @db.VarChar(20)
+  network           NetworkProvider
+  planCode          String            @map("plan_code") @db.VarChar(100)
+  planName          String?           @map("plan_name") @db.VarChar(200)
+  amount            BigInt
+  dataVolume        String?           @map("data_volume") @db.VarChar(50)
+  validity          String?           @db.VarChar(50)
+  provider          String            @db.VarChar(50)
+  providerReference String?           @map("provider_reference")
+  status            TransactionStatus @default(PENDING)
+  metadata          Json?
+  createdAt         DateTime          @default(now()) @map("created_at")
+  updatedAt         DateTime          @updatedAt @map("updated_at")
+
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  @@map("data_purchases")
+}
+
+model BankTransfer {
+  id                String            @id @default(cuid())
+  transactionId     String            @unique @map("transaction_id")
+  beneficiaryId     String?           @map("beneficiary_id")
+  accountNumber     String            @map("account_number") @db.VarChar(20)
+  accountName       String            @map("account_name") @db.VarChar(200)
+  bankCode          String            @map("bank_code") @db.VarChar(20)
+  bankName          String?           @map("bank_name") @db.VarChar(100)
+  amount            BigInt
+  narration         String?           @db.VarChar(200)
+  provider          String            @db.VarChar(50)
+  providerReference String?           @map("provider_reference")
+  sessionId         String?           @map("session_id")
+  status            TransactionStatus @default(PENDING)
+  metadata          Json?
+  createdAt         DateTime          @default(now()) @map("created_at")
+  updatedAt         DateTime          @updatedAt @map("updated_at")
+
+  transaction Transaction  @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  beneficiary Beneficiary? @relation(fields: [beneficiaryId], references: [id])
+
+  @@index([accountNumber, bankCode])
+  @@map("bank_transfers")
+}
+
+model Beneficiary {
+  id            String   @id @default(cuid())
+  userId        String   @map("user_id")
+  accountNumber String   @map("account_number") @db.VarChar(20)
+  accountName   String   @map("account_name") @db.VarChar(200)
+  bankCode      String   @map("bank_code") @db.VarChar(20)
+  bankName      String?  @map("bank_name") @db.VarChar(100)
+  nickname      String?  @db.VarChar(100)
+  isDefault     Boolean  @default(false) @map("is_default")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bankTransfers BankTransfer[]
+
+  @@unique([userId, accountNumber, bankCode])
+  @@map("beneficiaries")
+}
+
+model Payment {
+  id                String          @id @default(cuid())
+  userId            String          @map("user_id")
+  transactionId     String?         @unique @map("transaction_id")
+  amount            BigInt
+  currency          String          @default("NGN") @db.VarChar(3)
+  status            PaymentStatus   @default(PENDING)
+  provider          PaymentProvider
+  providerReference String?         @map("provider_reference")
+  paymentMethod     String?         @map("payment_method") @db.VarChar(50)
+  authorizationUrl  String?         @map("authorization_url")
+  paidAt            DateTime?       @map("paid_at")
+  metadata          Json?
+  failureReason     String?         @map("failure_reason") @db.VarChar(1000)
+  createdAt         DateTime        @default(now()) @map("created_at")
+  updatedAt         DateTime        @updatedAt @map("updated_at")
+
+  user        User         @relation(fields: [userId], references: [id])
+  transaction Transaction? @relation(fields: [transactionId], references: [id])
+
+  @@unique([provider, providerReference])
+  @@index([userId, createdAt])
+  @@map("payments")
+}
+
+model WebhookEvent {
+  id          String    @id @default(cuid())
+  provider    String    @db.VarChar(50)
+  eventId     String    @map("event_id")
+  eventType   String    @map("event_type") @db.VarChar(100)
+  payload     Json
+  processed   Boolean   @default(false)
+  processedAt DateTime? @map("processed_at")
+  error       String?   @db.VarChar(2000)
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  @@unique([provider, eventId])
+  @@index([processed, createdAt])
+  @@map("webhook_events")
+}
+
+model ConversationSession {
+  id          String   @id @default(cuid())
+  userId      String   @map("user_id")
+  phoneNumber String   @unique @map("phone_number")
+  state       String   @default("IDLE") @db.VarChar(80)
+  context     Json     @default("{}")
+  expiresAt   DateTime @map("expires_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@map("conversation_sessions")
+}
+
+model AuthChallenge {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  type      String   @db.VarChar(40)
+  codeHash  String   @map("code_hash")
+  expiresAt DateTime @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+  attempts  Int      @default(0)
+  metadata  Json?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, type])
+  @@map("auth_challenges")
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  userId     String?  @map("user_id")
+  action     String   @db.VarChar(100)
+  resource   String?  @db.VarChar(100)
+  resourceId String?  @map("resource_id")
+  metadata   Json?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  user User? @relation(fields: [userId], references: [id])
+
+  @@index([userId, createdAt])
+  @@index([action, createdAt])
+  @@map("audit_logs")
+}
